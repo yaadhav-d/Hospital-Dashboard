@@ -1,8 +1,11 @@
+import time
+import random
 import pandas as pd
 import streamlit as st
 import mysql.connector
 import requests
 import plotly.express as px
+from faker import Faker
 from streamlit_autorefresh import st_autorefresh
 
 # -------------------------------------------------
@@ -31,6 +34,17 @@ DB_CONFIG = {
 
 WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
 CITY = "Chennai"
+
+fake = Faker()
+
+DEPARTMENTS = [
+    "General Medicine",
+    "Orthopedics",
+    "Cardiology",
+    "Neurology",
+    "Pediatrics",
+    "Trauma"
+]
 
 # -------------------------------------------------
 # DB FUNCTIONS
@@ -80,6 +94,61 @@ def temperature_band(temp):
         return "Cool"
 
 # -------------------------------------------------
+# SAFE AUTO INSERT ON APP WAKE (NO SLEEP)
+# -------------------------------------------------
+def insert_fake_patient():
+    condition, temperature = get_weather()
+
+    patient_code = f"ER-{random.randint(100000, 999999)}"
+    patient_name = fake.name()
+    triage_level = random.choices(
+        [1, 2, 3, 4, 5],
+        weights=[5, 10, 35, 30, 20]
+    )[0]
+
+    wait_time = random.randint(5, 120)
+    department = random.choice(DEPARTMENTS)
+    temperature_at_arrival = round(temperature + random.uniform(-1.5, 1.5), 1)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO er_patients_live
+        (
+            patient_code,
+            patient_name,
+            triage_level,
+            wait_time,
+            department,
+            temperature_at_arrival
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            patient_code,
+            patient_name,
+            triage_level,
+            wait_time,
+            department,
+            temperature_at_arrival
+        )
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# insert once per minute ONLY when app reruns
+if "last_insert_ts" not in st.session_state:
+    st.session_state["last_insert_ts"] = 0
+
+now_ts = time.time()
+
+if now_ts - st.session_state["last_insert_ts"] >= 60:
+    insert_fake_patient()
+    st.session_state["last_insert_ts"] = now_ts
+
+# -------------------------------------------------
 # LOAD DATA
 # -------------------------------------------------
 df = load_data()
@@ -118,15 +187,8 @@ c3.metric("Critical Patients", len(critical_df))
 # =================================================
 col1, col2 = st.columns(2)
 
-# ----------------------------
 # TRIAGE DISTRIBUTION (DONUT)
-# ----------------------------
-triage_counts = (
-    df["triage_level"]
-    .value_counts()
-    .sort_index()
-    .reset_index()
-)
+triage_counts = df["triage_level"].value_counts().sort_index().reset_index()
 triage_counts.columns = ["Triage Level", "Patients"]
 
 fig_triage = px.pie(
@@ -137,17 +199,10 @@ fig_triage = px.pie(
     title="Triage Severity Distribution",
     template="plotly_dark"
 )
-
 col1.plotly_chart(fig_triage, use_container_width=True)
 
-# ----------------------------
-# DEPARTMENT LOAD (BAR)
-# ----------------------------
-dept_counts = (
-    df["department"]
-    .value_counts()
-    .reset_index()
-)
+# DEPARTMENT LOAD
+dept_counts = df["department"].value_counts().reset_index()
 dept_counts.columns = ["Department", "Patients"]
 
 fig_dept = px.bar(
@@ -159,7 +214,6 @@ fig_dept = px.bar(
     title="Department Load",
     template="plotly_dark"
 )
-
 col2.plotly_chart(fig_dept, use_container_width=True)
 
 # =================================================
@@ -168,11 +222,7 @@ col2.plotly_chart(fig_dept, use_container_width=True)
 df_temp = df.copy()
 df_temp["Temperature Band"] = df_temp["temperature_at_arrival"].apply(temperature_band)
 
-temp_counts = (
-    df_temp["Temperature Band"]
-    .value_counts()
-    .reset_index()
-)
+temp_counts = df_temp["Temperature Band"].value_counts().reset_index()
 temp_counts.columns = ["Temperature Band", "Patients"]
 
 fig_temp = px.pie(
@@ -206,10 +256,7 @@ if condition in ["Rain", "Thunderstorm"] or temperature > 35:
 # 🚨 CRITICAL ALERTS
 # =================================================
 st.subheader("🚨 Critical Triage Alerts (Level 1 & 2)")
-if not critical_df.empty:
-    st.dataframe(critical_df.head(5), use_container_width=True)
-else:
-    st.success("No critical patients currently")
+st.dataframe(critical_df.head(5), use_container_width=True)
 
 # =================================================
 # 📋 LIVE FEED
