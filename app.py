@@ -37,6 +37,7 @@ WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
 CITY = "Chennai"
 
 fake = Faker()
+IST = pytz.timezone("Asia/Kolkata")
 
 DEPARTMENTS = [
     "General Medicine",
@@ -46,8 +47,6 @@ DEPARTMENTS = [
     "Pediatrics",
     "Trauma"
 ]
-
-IST = pytz.timezone("Asia/Kolkata")
 
 # -------------------------------------------------
 # DB FUNCTIONS
@@ -97,6 +96,18 @@ def temperature_band(temp):
         return "Cool"
 
 # -------------------------------------------------
+# WAIT TIME FORMATTER
+# -------------------------------------------------
+def format_wait_time(minutes):
+    minutes = int(minutes)
+    if minutes < 60:
+        return f"{minutes} min"
+    else:
+        hrs = minutes // 60
+        mins = minutes % 60
+        return f"{hrs} hr {mins} min"
+
+# -------------------------------------------------
 # SAFE AUTO INSERT (ON APP WAKE)
 # -------------------------------------------------
 def insert_fake_patient():
@@ -122,7 +133,7 @@ def insert_fake_patient():
             f"ER-{random.randint(100000, 999999)}",
             fake.name(),
             random.choices([1, 2, 3, 4, 5], weights=[5, 10, 35, 30, 20])[0],
-            random.randint(5, 120),
+            random.randint(5, 140),
             random.choice(DEPARTMENTS),
             round(temperature + random.uniform(-1.5, 1.5), 1)
         )
@@ -148,30 +159,41 @@ if df.empty:
     st.warning("No ER patient data available yet.")
     st.stop()
 
-# Convert arrival_time to IST (timezone-safe)
+# Timezone conversion
 df["arrival_time"] = pd.to_datetime(df["arrival_time"], utc=True).dt.tz_convert(IST)
 
-# 🔑 DISPLAY-ONLY TIME COLUMN (12-hour format)
+# Display-friendly columns
 df["Arrival Time (IST)"] = df["arrival_time"].dt.strftime("%I:%M %p")
+df["Temperature Band"] = df["temperature_at_arrival"].apply(temperature_band)
+df["Wait Duration"] = df["wait_time"].apply(format_wait_time)
+
+# Presentation layer (human-friendly)
+df_display = df.rename(columns={
+    "patient_code": "Patient Code",
+    "patient_name": "Patient Name",
+    "triage_level": "Triage Level",
+    "department": "Department",
+    "temperature_at_arrival": "Temp at Arrival (°C)"
+})
 
 total_patients = len(df)
 avg_wait = round(df["wait_time"].mean(), 1)
-critical_df = df[df["triage_level"].isin([1, 2])]
+critical_df = df_display[df_display["Triage Level"].isin([1, 2])]
 
-latest_patient = df.iloc[0]
-latest_time_ist = latest_patient["Arrival Time (IST)"]
+latest_patient = df_display.iloc[0]
+latest_time = df.iloc[0]["Arrival Time (IST)"]
 
 # -------------------------------------------------
-# HEADER (ENHANCED)
+# HEADER
 # -------------------------------------------------
 st.markdown(
     """
-    <div style="padding:15px;border-radius:12px;
+    <div style="padding:16px;border-radius:14px;
                 background:linear-gradient(90deg,#1f2937,#111827);
                 color:white;">
-        <h1 style="margin-bottom:0;">🏥 ER Command Center</h1>
-        <p style="margin-top:5px;color:#d1d5db;">
-            Real-time Emergency Room Operations & Patient Flow Monitoring
+        <h1 style="margin-bottom:4px;">🏥 ER Command Center</h1>
+        <p style="margin:0;color:#d1d5db;">
+            Live Emergency Operations & Patient Flow Monitoring
         </p>
     </div>
     """,
@@ -181,25 +203,24 @@ st.markdown(
 st.markdown("")
 
 # -------------------------------------------------
-# KPI ROW + LATEST ENTRY
+# KPI ROW
 # -------------------------------------------------
 k1, k2, k3, k4 = st.columns(4)
 
 k1.metric("Current ER Occupancy", total_patients)
-k2.metric("Average Wait Time (min)", avg_wait)
+k2.metric("Avg Wait Time (min)", avg_wait)
 k3.metric("Critical Patients", len(critical_df))
 k4.metric(
     "Latest Entry",
-    latest_patient["patient_name"],
-    f"{latest_patient['department']} • {latest_time_ist}"
+    latest_patient["Patient Name"],
+    f"{latest_patient['Department']} • {latest_time}"
 )
 
-# =================================================
-# 📊 CHARTS
-# =================================================
+# -------------------------------------------------
+# CHARTS
+# -------------------------------------------------
 col1, col2 = st.columns(2)
 
-# TRIAGE DONUT
 triage_counts = df["triage_level"].value_counts().sort_index().reset_index()
 triage_counts.columns = ["Triage Level", "Patients"]
 
@@ -213,7 +234,6 @@ fig_triage = px.pie(
 )
 col1.plotly_chart(fig_triage, use_container_width=True)
 
-# DEPARTMENT LOAD
 dept_counts = df["department"].value_counts().reset_index()
 dept_counts.columns = ["Department", "Patients"]
 
@@ -222,16 +242,10 @@ fig_dept = px.bar(
     x="Patients",
     y="Department",
     orientation="h",
-    text="Patients",
     title="Department Load",
     template="plotly_dark"
 )
 col2.plotly_chart(fig_dept, use_container_width=True)
-
-# =================================================
-# 🌡 TEMPERATURE DONUT
-# =================================================
-df["Temperature Band"] = df["temperature_at_arrival"].apply(temperature_band)
 
 temp_counts = df["Temperature Band"].value_counts().reset_index()
 temp_counts.columns = ["Temperature Band", "Patients"]
@@ -247,22 +261,42 @@ fig_temp = px.pie(
 st.plotly_chart(fig_temp, use_container_width=True)
 
 # -------------------------------------------------
-# ALERTS & LIVE FEED
+# CRITICAL TRIAGE ALERTS
 # -------------------------------------------------
 st.subheader("🚨 Critical Triage Alerts")
-st.dataframe(critical_df.head(5), use_container_width=True)
 
+critical_cols = [
+    "Patient Code",
+    "Patient Name",
+    "Triage Level",
+    "Wait Duration",
+    "Department",
+    "Arrival Time (IST)",
+    "Temp at Arrival (°C)"
+]
+
+st.dataframe(
+    critical_df[critical_cols].head(10),
+    use_container_width=True
+)
+
+# -------------------------------------------------
+# LIVE PATIENT FEED
+# -------------------------------------------------
 st.subheader("📋 Live Patient Feed")
 
-display_cols = [
-    "patient_code",
-    "patient_name",
-    "triage_level",
-    "wait_time",
-    "department",
+live_cols = [
+    "Patient Code",
+    "Patient Name",
+    "Triage Level",
+    "Wait Duration",
+    "Department",
     "Arrival Time (IST)",
-    "temperature_at_arrival",
+    "Temp at Arrival (°C)",
     "Temperature Band"
 ]
 
-st.dataframe(df[display_cols].head(15), use_container_width=True)
+st.dataframe(
+    df_display[live_cols].head(15),
+    use_container_width=True
+)
