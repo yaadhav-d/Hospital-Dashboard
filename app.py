@@ -7,6 +7,8 @@ import requests
 import plotly.express as px
 from faker import Faker
 from streamlit_autorefresh import st_autorefresh
+from datetime import timezone
+import pytz
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -22,7 +24,7 @@ st.set_page_config(
 st_autorefresh(interval=60 * 1000, key="er_refresh")
 
 # -------------------------------------------------
-# STREAMLIT SECRETS (FOR DEPLOYMENT)
+# STREAMLIT SECRETS
 # -------------------------------------------------
 DB_CONFIG = {
     "host": st.secrets["DB_HOST"],
@@ -45,6 +47,8 @@ DEPARTMENTS = [
     "Pediatrics",
     "Trauma"
 ]
+
+IST = pytz.timezone("Asia/Kolkata")
 
 # -------------------------------------------------
 # DB FUNCTIONS
@@ -94,24 +98,14 @@ def temperature_band(temp):
         return "Cool"
 
 # -------------------------------------------------
-# SAFE AUTO INSERT ON APP WAKE (NO SLEEP)
+# SAFE AUTO INSERT (ON APP WAKE)
 # -------------------------------------------------
 def insert_fake_patient():
     condition, temperature = get_weather()
 
-    patient_code = f"ER-{random.randint(100000, 999999)}"
-    patient_name = fake.name()
-    triage_level = random.choices(
-        [1, 2, 3, 4, 5],
-        weights=[5, 10, 35, 30, 20]
-    )[0]
-
-    wait_time = random.randint(5, 120)
-    department = random.choice(DEPARTMENTS)
-    temperature_at_arrival = round(temperature + random.uniform(-1.5, 1.5), 1)
-
     conn = get_connection()
     cursor = conn.cursor()
+
     cursor.execute(
         """
         INSERT INTO er_patients_live
@@ -126,27 +120,25 @@ def insert_fake_patient():
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (
-            patient_code,
-            patient_name,
-            triage_level,
-            wait_time,
-            department,
-            temperature_at_arrival
+            f"ER-{random.randint(100000, 999999)}",
+            fake.name(),
+            random.choices([1, 2, 3, 4, 5], weights=[5, 10, 35, 30, 20])[0],
+            random.randint(5, 120),
+            random.choice(DEPARTMENTS),
+            round(temperature + random.uniform(-1.5, 1.5), 1)
         )
     )
+
     conn.commit()
     cursor.close()
     conn.close()
 
-# insert once per minute ONLY when app reruns
 if "last_insert_ts" not in st.session_state:
     st.session_state["last_insert_ts"] = 0
 
-now_ts = time.time()
-
-if now_ts - st.session_state["last_insert_ts"] >= 60:
+if time.time() - st.session_state["last_insert_ts"] >= 60:
     insert_fake_patient()
-    st.session_state["last_insert_ts"] = now_ts
+    st.session_state["last_insert_ts"] = time.time()
 
 # -------------------------------------------------
 # LOAD DATA
@@ -157,37 +149,55 @@ if df.empty:
     st.warning("No ER patient data available yet.")
     st.stop()
 
-df["arrival_time"] = pd.to_datetime(df["arrival_time"])
+# Convert arrival_time to IST
+df["arrival_time"] = pd.to_datetime(df["arrival_time"], utc=True).dt.tz_convert(IST)
 
 total_patients = len(df)
 avg_wait = round(df["wait_time"].mean(), 1)
 critical_df = df[df["triage_level"].isin([1, 2])]
 
-# -------------------------------------------------
-# WEATHER DATA
-# -------------------------------------------------
-condition, temperature = get_weather()
-current_temp_category = temperature_band(temperature)
+latest_patient = df.iloc[0]
+latest_time_ist = latest_patient["arrival_time"].strftime("%d %b %Y, %I:%M %p")
 
 # -------------------------------------------------
-# HEADER
+# HEADER (ENHANCED)
 # -------------------------------------------------
-st.markdown("## 🏥 ER Command Center")
+st.markdown(
+    """
+    <div style="padding:15px;border-radius:12px;
+                background:linear-gradient(90deg,#1f2937,#111827);
+                color:white;">
+        <h1 style="margin-bottom:0;">🏥 ER Command Center</h1>
+        <p style="margin-top:5px;color:#d1d5db;">
+            Real-time Emergency Room Operations & Patient Flow Monitoring
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown("")
 
 # -------------------------------------------------
-# KPI ROW
+# KPI ROW + LATEST ENTRY
 # -------------------------------------------------
-c1, c2, c3 = st.columns(3)
-c1.metric("Current ER Occupancy", total_patients)
-c2.metric("Average Wait Time (min)", avg_wait)
-c3.metric("Critical Patients", len(critical_df))
+k1, k2, k3, k4 = st.columns(4)
+
+k1.metric("Current ER Occupancy", total_patients)
+k2.metric("Average Wait Time (min)", avg_wait)
+k3.metric("Critical Patients", len(critical_df))
+k4.metric(
+    "Latest Entry",
+    latest_patient["patient_name"],
+    f"{latest_patient['department']} • {latest_time_ist}"
+)
 
 # =================================================
-# 📊 CHARTS SECTION
+# 📊 CHARTS
 # =================================================
 col1, col2 = st.columns(2)
 
-# TRIAGE DISTRIBUTION (DONUT)
+# TRIAGE DONUT
 triage_counts = df["triage_level"].value_counts().sort_index().reset_index()
 triage_counts.columns = ["Triage Level", "Patients"]
 
@@ -217,12 +227,11 @@ fig_dept = px.bar(
 col2.plotly_chart(fig_dept, use_container_width=True)
 
 # =================================================
-# 🌡 TEMPERATURE BASED PATIENT FLOW (DONUT)
+# 🌡 TEMPERATURE DONUT
 # =================================================
-df_temp = df.copy()
-df_temp["Temperature Band"] = df_temp["temperature_at_arrival"].apply(temperature_band)
+df["Temperature Band"] = df["temperature_at_arrival"].apply(temperature_band)
 
-temp_counts = df_temp["Temperature Band"].value_counts().reset_index()
+temp_counts = df["Temperature Band"].value_counts().reset_index()
 temp_counts.columns = ["Temperature Band", "Patients"]
 
 fig_temp = px.pie(
@@ -231,35 +240,15 @@ fig_temp = px.pie(
     values="Patients",
     hole=0.55,
     title="Patient Distribution by Temperature Range",
-    color="Temperature Band",
-    color_discrete_map={
-        "Extreme Heat": "#D0021B",
-        "Hot": "#F5A623",
-        "Normal": "#7ED321",
-        "Cool": "#4A90E2",
-        "Unknown": "#9B9B9B"
-    },
     template="plotly_dark"
 )
-
 st.plotly_chart(fig_temp, use_container_width=True)
 
-st.info(f"Current Temperature: **{temperature}°C** → **{current_temp_category}** conditions")
-
 # -------------------------------------------------
-# WEATHER ALERT
+# ALERTS & LIVE FEED
 # -------------------------------------------------
-if condition in ["Rain", "Thunderstorm"] or temperature > 35:
-    st.warning("⚠ Extreme weather detected — ER inflow may increase")
-
-# =================================================
-# 🚨 CRITICAL ALERTS
-# =================================================
-st.subheader("🚨 Critical Triage Alerts (Level 1 & 2)")
+st.subheader("🚨 Critical Triage Alerts")
 st.dataframe(critical_df.head(5), use_container_width=True)
 
-# =================================================
-# 📋 LIVE FEED
-# =================================================
 st.subheader("📋 Live Patient Feed")
 st.dataframe(df.head(15), use_container_width=True)
