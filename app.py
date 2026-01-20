@@ -160,7 +160,18 @@ col2.plotly_chart(fig_dept, use_container_width=True)
 # 🌡 TEMPERATURE BASED PATIENT FLOW (DONUT)
 # =================================================
 df_temp = df.copy()
-df_temp["Temperature Band"] = temp_category
+def temperature_band(temp):
+    if temp >= 38:
+        return "Extreme Heat"
+    elif temp >= 32:
+        return "Hot"
+    elif temp >= 25:
+        return "Normal"
+    else:
+        return "Cool"
+
+df_temp["Temperature Band"] = df_temp["temperature_at_arrival"].apply(temperature_band)
+
 
 temp_counts = (
     df_temp["Temperature Band"]
