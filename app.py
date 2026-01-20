@@ -7,7 +7,6 @@ import requests
 import plotly.express as px
 from faker import Faker
 from streamlit_autorefresh import st_autorefresh
-from datetime import timezone
 import pytz
 
 # -------------------------------------------------
@@ -101,7 +100,7 @@ def temperature_band(temp):
 # SAFE AUTO INSERT (ON APP WAKE)
 # -------------------------------------------------
 def insert_fake_patient():
-    condition, temperature = get_weather()
+    _, temperature = get_weather()
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -149,16 +148,18 @@ if df.empty:
     st.warning("No ER patient data available yet.")
     st.stop()
 
-# Convert arrival_time to IST
+# Convert arrival_time to IST (timezone-safe)
 df["arrival_time"] = pd.to_datetime(df["arrival_time"], utc=True).dt.tz_convert(IST)
+
+# 🔑 DISPLAY-ONLY TIME COLUMN (12-hour format)
+df["Arrival Time (IST)"] = df["arrival_time"].dt.strftime("%I:%M %p")
 
 total_patients = len(df)
 avg_wait = round(df["wait_time"].mean(), 1)
 critical_df = df[df["triage_level"].isin([1, 2])]
 
 latest_patient = df.iloc[0]
-latest_time_ist = latest_patient["arrival_time"].strftime("%d %b %Y, %I:%M %p")
-
+latest_time_ist = latest_patient["Arrival Time (IST)"]
 
 # -------------------------------------------------
 # HEADER (ENHANCED)
@@ -252,4 +253,16 @@ st.subheader("🚨 Critical Triage Alerts")
 st.dataframe(critical_df.head(5), use_container_width=True)
 
 st.subheader("📋 Live Patient Feed")
-st.dataframe(df.head(15), use_container_width=True)
+
+display_cols = [
+    "patient_code",
+    "patient_name",
+    "triage_level",
+    "wait_time",
+    "department",
+    "Arrival Time (IST)",
+    "temperature_at_arrival",
+    "Temperature Band"
+]
+
+st.dataframe(df[display_cols].head(15), use_container_width=True)
