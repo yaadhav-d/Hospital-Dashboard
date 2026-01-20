@@ -41,8 +41,13 @@ def get_connection():
 def load_data():
     conn = get_connection()
     query = """
-        SELECT patient_code, patient_name, triage_level,
-               wait_time, department, arrival_time
+        SELECT patient_code,
+               patient_name,
+               triage_level,
+               wait_time,
+               department,
+               arrival_time,
+               temperature_at_arrival
         FROM er_patients_live
         ORDER BY arrival_time DESC
         LIMIT 500
@@ -63,7 +68,9 @@ def get_weather():
     return data["weather"][0]["main"], data["main"]["temp"]
 
 def temperature_band(temp):
-    if temp >= 38:
+    if pd.isna(temp):
+        return "Unknown"
+    elif temp >= 38:
         return "Extreme Heat"
     elif temp >= 32:
         return "Hot"
@@ -91,7 +98,7 @@ critical_df = df[df["triage_level"].isin([1, 2])]
 # WEATHER DATA
 # -------------------------------------------------
 condition, temperature = get_weather()
-temp_category = temperature_band(temperature)
+current_temp_category = temperature_band(temperature)
 
 # -------------------------------------------------
 # HEADER
@@ -128,7 +135,6 @@ fig_triage = px.pie(
     values="Patients",
     hole=0.55,
     title="Triage Severity Distribution",
-    color="Triage Level",
     template="plotly_dark"
 )
 
@@ -160,18 +166,7 @@ col2.plotly_chart(fig_dept, use_container_width=True)
 # 🌡 TEMPERATURE BASED PATIENT FLOW (DONUT)
 # =================================================
 df_temp = df.copy()
-def temperature_band(temp):
-    if temp >= 38:
-        return "Extreme Heat"
-    elif temp >= 32:
-        return "Hot"
-    elif temp >= 25:
-        return "Normal"
-    else:
-        return "Cool"
-
 df_temp["Temperature Band"] = df_temp["temperature_at_arrival"].apply(temperature_band)
-
 
 temp_counts = (
     df_temp["Temperature Band"]
@@ -191,14 +186,15 @@ fig_temp = px.pie(
         "Extreme Heat": "#D0021B",
         "Hot": "#F5A623",
         "Normal": "#7ED321",
-        "Cool": "#4A90E2"
+        "Cool": "#4A90E2",
+        "Unknown": "#9B9B9B"
     },
     template="plotly_dark"
 )
 
 st.plotly_chart(fig_temp, use_container_width=True)
 
-st.info(f"Current Temperature: **{temperature}°C** → **{temp_category}** conditions")
+st.info(f"Current Temperature: **{temperature}°C** → **{current_temp_category}** conditions")
 
 # -------------------------------------------------
 # WEATHER ALERT
