@@ -1,11 +1,9 @@
-import time
-import random
 import pandas as pd
 import streamlit as st
 import mysql.connector
 import requests
 import plotly.express as px
-from faker import Faker
+import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 # ----------------------------
@@ -17,12 +15,12 @@ st.set_page_config(
 )
 
 # ----------------------------
-# AUTO REFRESH (EVERY 30s)
+# AUTO REFRESH (EVERY 1 MIN)
 # ----------------------------
-st_autorefresh(interval=30 * 1000, key="er_refresh")
+st_autorefresh(interval=60 * 1000, key="er_refresh")
 
 # ----------------------------
-# SECRETS CONFIG (STREAMLIT)
+# SECRETS (STREAMLIT CLOUD)
 # ----------------------------
 DB_CONFIG = {
     "host": st.secrets["DB_HOST"],
@@ -34,25 +32,6 @@ DB_CONFIG = {
 
 WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
 CITY = "Chennai"
-
-fake = Faker()
-
-DEPARTMENTS = [
-    "General Medicine",
-    "Orthopedics",
-    "Cardiology",
-    "Neurology",
-    "Pediatrics",
-    "Trauma"
-]
-
-TRIAGE_WEIGHTS = {
-    1: 0.05,
-    2: 0.10,
-    3: 0.35,
-    4: 0.30,
-    5: 0.20
-}
 
 # ----------------------------
 # DB HELPERS
@@ -68,73 +47,23 @@ def load_data():
                wait_time, department, arrival_time
         FROM er_patients_live
         ORDER BY arrival_time DESC
-        LIMIT 200
+        LIMIT 500
         """,
         conn
     )
     conn.close()
     return df
 
-# ----------------------------
-# DATA GENERATOR (SAFE)
-# ----------------------------
-def generate_patient():
-    triage = random.choices(
-        list(TRIAGE_WEIGHTS.keys()),
-        list(TRIAGE_WEIGHTS.values())
-    )[0]
-
-    if triage == 1:
-        wait = random.randint(0, 5)
-    elif triage == 2:
-        wait = random.randint(5, 15)
-    elif triage == 3:
-        wait = random.randint(15, 40)
-    elif triage == 4:
-        wait = random.randint(30, 90)
-    else:
-        wait = random.randint(60, 180)
-
-    return {
-        "patient_code": f"ER-{random.randint(100000, 999999)}",
-        "patient_name": fake.name(),
-        "triage_level": triage,
-        "wait_time": wait,
-        "department": random.choice(DEPARTMENTS)
-    }
-
-def insert_patient(patient):
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO er_patients_live
-        (patient_code, patient_name, triage_level, wait_time, department)
-        VALUES (%s, %s, %s, %s, %s)
-        """,
-        (
-            patient["patient_code"],
-            patient["patient_name"],
-            patient["triage_level"],
-            patient["wait_time"],
-            patient["department"]
-        )
+def get_weather():
+    url = (
+        f"https://api.openweathermap.org/data/2.5/weather"
+        f"?q={CITY}&appid={WEATHER_API_KEY}&units=metric"
     )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    data = requests.get(url).json()
+    return data["weather"][0]["main"], data["main"]["temp"]
 
 # ----------------------------
-# OPTIONAL GENERATOR CONTROL
-# ----------------------------
-st.sidebar.header("Simulation Control")
-
-if st.sidebar.button("➕ Insert 1 Fake Patient"):
-    insert_patient(generate_patient())
-    st.sidebar.success("Patient inserted")
-
-# ----------------------------
-# DASHBOARD
+# LOAD DATA
 # ----------------------------
 df = load_data()
 
@@ -148,31 +77,50 @@ total_patients = len(df)
 avg_wait = round(df["wait_time"].mean(), 1)
 critical = df[df["triage_level"].isin([1, 2])]
 
+# ----------------------------
+# HEADER
+# ----------------------------
 st.markdown("## 🏥 ER Command Center")
 
+# ----------------------------
+# KPIs
+# ----------------------------
 c1, c2, c3 = st.columns(3)
 c1.metric("Current ER Occupancy", total_patients)
 c2.metric("Average Wait Time (min)", avg_wait)
 c3.metric("Critical Patients", len(critical))
 
-# ----------------------------
-# CHARTS
-# ----------------------------
+# ============================
+# 📊 CORE OPERATIONAL CHARTS
+# ============================
+
 col1, col2 = st.columns(2)
 
-triage_counts = df["triage_level"].value_counts().sort_index().reset_index()
-triage_counts.columns = ["Triage", "Patients"]
+# ----------------------------
+# DONUT — TRIAGE DISTRIBUTION
+# ----------------------------
+triage_counts = (
+    df["triage_level"]
+    .value_counts()
+    .sort_index()
+    .reset_index()
+)
+triage_counts.columns = ["Triage Level", "Patients"]
 
 fig_donut = px.pie(
     triage_counts,
-    names="Triage",
+    names="Triage Level",
     values="Patients",
     hole=0.5,
     title="Triage Severity Distribution",
     template="plotly_dark"
 )
+
 col1.plotly_chart(fig_donut, use_container_width=True)
 
+# ----------------------------
+# BAR — DEPARTMENT LOAD
+# ----------------------------
 dept_counts = df["department"].value_counts().reset_index()
 dept_counts.columns = ["Department", "Patients"]
 
@@ -182,52 +130,79 @@ fig_dept = px.bar(
     y="Department",
     orientation="h",
     title="Department Load",
+    text="Patients",
     template="plotly_dark"
 )
+
 col2.plotly_chart(fig_dept, use_container_width=True)
 
-wait_by_dept = (
-    df.groupby("department")["wait_time"]
-    .mean()
-    .round(1)
-    .reset_index()
+# ============================
+# 🌦 WEATHER IMPACT ON PATIENT FLOW
+# ============================
+
+condition, temperature = get_weather()
+
+# Patient inflow per 10 minutes
+flow = (
+    df
+    .set_index("arrival_time")
+    .resample("10T")
+    .size()
+    .reset_index(name="Patients")
 )
 
-fig_wait = px.bar(
-    wait_by_dept,
-    x="wait_time",
-    y="department",
-    orientation="h",
-    title="Average Wait Time by Department",
-    color="wait_time",
-    template="plotly_dark"
+# Weather line (constant temp over time window)
+flow["Temperature"] = temperature
+
+fig_weather = go.Figure()
+
+fig_weather.add_trace(
+    go.Bar(
+        x=flow["arrival_time"],
+        y=flow["Patients"],
+        name="Patient Inflow",
+        yaxis="y1"
+    )
 )
 
-st.plotly_chart(fig_wait, use_container_width=True)
+fig_weather.add_trace(
+    go.Scatter(
+        x=flow["arrival_time"],
+        y=flow["Temperature"],
+        name="Temperature (°C)",
+        yaxis="y2",
+        mode="lines+markers"
+    )
+)
+
+fig_weather.update_layout(
+    title="Weather Impact on ER Patient Flow",
+    template="plotly_dark",
+    height=420,
+    xaxis_title="Time",
+    yaxis=dict(title="Patients"),
+    yaxis2=dict(
+        title="Temperature (°C)",
+        overlaying="y",
+        side="right"
+    )
+)
+
+st.plotly_chart(fig_weather, use_container_width=True)
 
 # ----------------------------
-# WEATHER BANNER
+# WEATHER INFO
 # ----------------------------
-try:
-    weather = requests.get(
-        f"https://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={WEATHER_API_KEY}&units=metric"
-    ).json()
+st.info(f"Current Weather: {condition} | {temperature}°C")
 
-    condition = weather["weather"][0]["main"]
-    temp = weather["main"]["temp"]
+if condition in ["Rain", "Thunderstorm"] or temperature > 35:
+    st.warning("⚠ Extreme weather detected — ER inflow trend should be monitored")
 
-    st.info(f"Weather: {condition} | {temp}°C")
+# ============================
+# ALERTS & LIVE FEED
+# ============================
 
-    if condition in ["Rain", "Thunderstorm"] or temp > 35:
-        st.warning("⚠ Extreme weather detected — monitor ER inflow")
-
-except Exception:
-    st.warning("Weather unavailable")
-
-# ----------------------------
-# ALERTS & FEED
-# ----------------------------
-st.subheader("🚨 Critical Triage Alerts")
+st.subheader("🚨 Critical Triage Alerts (Level 1 & 2)")
 st.dataframe(critical.head(5), use_container_width=True)
 
 st.subheader("📋 Live Patient Feed")
