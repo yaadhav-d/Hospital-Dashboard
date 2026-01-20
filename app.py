@@ -49,6 +49,12 @@ DEPARTMENTS = [
 ]
 
 # -------------------------------------------------
+# CONFIGURABLE ER RULES
+# -------------------------------------------------
+MAX_ER_HOURS = 6          # discharge patients older than this
+AUTO_INSERT_INTERVAL = 60  # seconds
+
+# -------------------------------------------------
 # DB FUNCTIONS
 # -------------------------------------------------
 def get_connection():
@@ -95,17 +101,29 @@ def temperature_band(temp):
     else:
         return "Cool"
 
-# -------------------------------------------------
-# WAIT TIME FORMATTER
-# -------------------------------------------------
 def format_wait_time(minutes):
     minutes = int(minutes)
     if minutes < 60:
         return f"{minutes} min"
-    else:
-        hrs = minutes // 60
-        mins = minutes % 60
-        return f"{hrs} hr {mins} min"
+    hrs = minutes // 60
+    mins = minutes % 60
+    return f"{hrs} hr {mins} min"
+
+# -------------------------------------------------
+# 🧹 AUTO DISCHARGE FUNCTION
+# -------------------------------------------------
+def cleanup_discharged_patients():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        DELETE FROM er_patients_live
+        WHERE arrival_time < NOW() - INTERVAL {MAX_ER_HOURS} HOUR
+        """
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # -------------------------------------------------
 # SAFE AUTO INSERT (ON APP WAKE)
@@ -115,7 +133,6 @@ def insert_fake_patient():
 
     conn = get_connection()
     cursor = conn.cursor()
-
     cursor.execute(
         """
         INSERT INTO er_patients_live
@@ -138,15 +155,21 @@ def insert_fake_patient():
             round(temperature + random.uniform(-1.5, 1.5), 1)
         )
     )
-
     conn.commit()
     cursor.close()
     conn.close()
 
+# -------------------------------------------------
+# APP WAKE LOGIC (ORDER MATTERS)
+# -------------------------------------------------
+# 1️⃣ Cleanup old patients
+cleanup_discharged_patients()
+
+# 2️⃣ Insert new patient (once per minute)
 if "last_insert_ts" not in st.session_state:
     st.session_state["last_insert_ts"] = 0
 
-if time.time() - st.session_state["last_insert_ts"] >= 60:
+if time.time() - st.session_state["last_insert_ts"] >= AUTO_INSERT_INTERVAL:
     insert_fake_patient()
     st.session_state["last_insert_ts"] = time.time()
 
@@ -159,15 +182,11 @@ if df.empty:
     st.warning("No ER patient data available yet.")
     st.stop()
 
-# Timezone conversion
 df["arrival_time"] = pd.to_datetime(df["arrival_time"], utc=True).dt.tz_convert(IST)
-
-# Display-friendly columns
 df["Arrival Time (IST)"] = df["arrival_time"].dt.strftime("%I:%M %p")
 df["Temperature Band"] = df["temperature_at_arrival"].apply(temperature_band)
 df["Wait Duration"] = df["wait_time"].apply(format_wait_time)
 
-# Presentation layer (human-friendly)
 df_display = df.rename(columns={
     "patient_code": "Patient Code",
     "patient_name": "Patient Name",
@@ -200,13 +219,10 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.markdown("")
-
 # -------------------------------------------------
 # KPI ROW
 # -------------------------------------------------
 k1, k2, k3, k4 = st.columns(4)
-
 k1.metric("Current ER Occupancy", total_patients)
 k2.metric("Avg Wait Time (min)", avg_wait)
 k3.metric("Critical Patients", len(critical_df))
@@ -223,80 +239,51 @@ col1, col2 = st.columns(2)
 
 triage_counts = df["triage_level"].value_counts().sort_index().reset_index()
 triage_counts.columns = ["Triage Level", "Patients"]
-
-fig_triage = px.pie(
-    triage_counts,
-    names="Triage Level",
-    values="Patients",
-    hole=0.55,
-    title="Triage Severity Distribution",
-    template="plotly_dark"
+col1.plotly_chart(
+    px.pie(triage_counts, names="Triage Level", values="Patients",
+           hole=0.55, title="Triage Severity Distribution",
+           template="plotly_dark"),
+    use_container_width=True
 )
-col1.plotly_chart(fig_triage, use_container_width=True)
 
 dept_counts = df["department"].value_counts().reset_index()
 dept_counts.columns = ["Department", "Patients"]
-
-fig_dept = px.bar(
-    dept_counts,
-    x="Patients",
-    y="Department",
-    orientation="h",
-    title="Department Load",
-    template="plotly_dark"
+col2.plotly_chart(
+    px.bar(dept_counts, x="Patients", y="Department",
+           orientation="h", title="Department Load",
+           template="plotly_dark"),
+    use_container_width=True
 )
-col2.plotly_chart(fig_dept, use_container_width=True)
 
 temp_counts = df["Temperature Band"].value_counts().reset_index()
 temp_counts.columns = ["Temperature Band", "Patients"]
-
-fig_temp = px.pie(
-    temp_counts,
-    names="Temperature Band",
-    values="Patients",
-    hole=0.55,
-    title="Patient Distribution by Temperature Range",
-    template="plotly_dark"
-)
-st.plotly_chart(fig_temp, use_container_width=True)
-
-# -------------------------------------------------
-# CRITICAL TRIAGE ALERTS
-# -------------------------------------------------
-st.subheader("🚨 Critical Triage Alerts")
-
-critical_cols = [
-    "Patient Code",
-    "Patient Name",
-    "Triage Level",
-    "Wait Duration",
-    "Department",
-    "Arrival Time (IST)",
-    "Temp at Arrival (°C)"
-]
-
-st.dataframe(
-    critical_df[critical_cols].head(10),
+st.plotly_chart(
+    px.pie(temp_counts, names="Temperature Band", values="Patients",
+           hole=0.55, title="Patient Distribution by Temperature Range",
+           template="plotly_dark"),
     use_container_width=True
 )
 
 # -------------------------------------------------
-# LIVE PATIENT FEED
+# TABLES
 # -------------------------------------------------
-st.subheader("📋 Live Patient Feed")
-
-live_cols = [
-    "Patient Code",
-    "Patient Name",
-    "Triage Level",
-    "Wait Duration",
-    "Department",
-    "Arrival Time (IST)",
-    "Temp at Arrival (°C)",
-    "Temperature Band"
-]
-
+st.subheader("🚨 Critical Triage Alerts")
 st.dataframe(
-    df_display[live_cols].head(15),
+    critical_df[[
+        "Patient Code", "Patient Name", "Triage Level",
+        "Wait Duration", "Department",
+        "Arrival Time (IST)", "Temp at Arrival (°C)"
+    ]].head(10),
+    use_container_width=True
+)
+
+st.subheader("📋 Live Patient Feed")
+st.dataframe(
+    df_display[[
+        "Patient Code", "Patient Name", "Triage Level",
+        "Wait Duration", "Department",
+        "Arrival Time (IST)", "Temp at Arrival (°C)",
+        "Temperature Band"
+    ]].head(15),
     use_container_width=True
 )
