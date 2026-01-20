@@ -159,6 +159,7 @@ critical_df = df[df["triage_level"].isin([1, 2])]
 latest_patient = df.iloc[0]
 latest_time_ist = latest_patient["arrival_time"].strftime("%d %b %Y, %I:%M %p")
 
+
 # -------------------------------------------------
 # HEADER (ENHANCED)
 # -------------------------------------------------
