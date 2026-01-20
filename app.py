@@ -3,25 +3,24 @@ import streamlit as st
 import mysql.connector
 import requests
 import plotly.express as px
-import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
-# ----------------------------
+# -------------------------------------------------
 # PAGE CONFIG
-# ----------------------------
+# -------------------------------------------------
 st.set_page_config(
     page_title="ER Command Center",
     layout="wide"
 )
 
-# ----------------------------
-# AUTO REFRESH (EVERY 1 MIN)
-# ----------------------------
+# -------------------------------------------------
+# AUTO REFRESH (EVERY 1 MINUTE)
+# -------------------------------------------------
 st_autorefresh(interval=60 * 1000, key="er_refresh")
 
-# ----------------------------
-# SECRETS (STREAMLIT CLOUD)
-# ----------------------------
+# -------------------------------------------------
+# STREAMLIT SECRETS (FOR DEPLOYMENT)
+# -------------------------------------------------
 DB_CONFIG = {
     "host": st.secrets["DB_HOST"],
     "user": st.secrets["DB_USER"],
@@ -33,27 +32,28 @@ DB_CONFIG = {
 WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
 CITY = "Chennai"
 
-# ----------------------------
-# DB HELPERS
-# ----------------------------
-def get_conn():
+# -------------------------------------------------
+# DB FUNCTIONS
+# -------------------------------------------------
+def get_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 def load_data():
-    conn = get_conn()
-    df = pd.read_sql(
-        """
+    conn = get_connection()
+    query = """
         SELECT patient_code, patient_name, triage_level,
                wait_time, department, arrival_time
         FROM er_patients_live
         ORDER BY arrival_time DESC
         LIMIT 500
-        """,
-        conn
-    )
+    """
+    df = pd.read_sql(query, conn)
     conn.close()
     return df
 
+# -------------------------------------------------
+# WEATHER FUNCTIONS
+# -------------------------------------------------
 def get_weather():
     url = (
         f"https://api.openweathermap.org/data/2.5/weather"
@@ -62,9 +62,19 @@ def get_weather():
     data = requests.get(url).json()
     return data["weather"][0]["main"], data["main"]["temp"]
 
-# ----------------------------
+def temperature_band(temp):
+    if temp >= 38:
+        return "Extreme Heat"
+    elif temp >= 32:
+        return "Hot"
+    elif temp >= 25:
+        return "Normal"
+    else:
+        return "Cool"
+
+# -------------------------------------------------
 # LOAD DATA
-# ----------------------------
+# -------------------------------------------------
 df = load_data()
 
 if df.empty:
@@ -75,29 +85,34 @@ df["arrival_time"] = pd.to_datetime(df["arrival_time"])
 
 total_patients = len(df)
 avg_wait = round(df["wait_time"].mean(), 1)
-critical = df[df["triage_level"].isin([1, 2])]
+critical_df = df[df["triage_level"].isin([1, 2])]
 
-# ----------------------------
+# -------------------------------------------------
+# WEATHER DATA
+# -------------------------------------------------
+condition, temperature = get_weather()
+temp_category = temperature_band(temperature)
+
+# -------------------------------------------------
 # HEADER
-# ----------------------------
+# -------------------------------------------------
 st.markdown("## 🏥 ER Command Center")
 
-# ----------------------------
-# KPIs
-# ----------------------------
+# -------------------------------------------------
+# KPI ROW
+# -------------------------------------------------
 c1, c2, c3 = st.columns(3)
 c1.metric("Current ER Occupancy", total_patients)
 c2.metric("Average Wait Time (min)", avg_wait)
-c3.metric("Critical Patients", len(critical))
+c3.metric("Critical Patients", len(critical_df))
 
-# ============================
-# 📊 CORE OPERATIONAL CHARTS
-# ============================
-
+# =================================================
+# 📊 CHARTS SECTION
+# =================================================
 col1, col2 = st.columns(2)
 
 # ----------------------------
-# DONUT — TRIAGE DISTRIBUTION
+# TRIAGE DISTRIBUTION (DONUT)
 # ----------------------------
 triage_counts = (
     df["triage_level"]
@@ -107,21 +122,26 @@ triage_counts = (
 )
 triage_counts.columns = ["Triage Level", "Patients"]
 
-fig_donut = px.pie(
+fig_triage = px.pie(
     triage_counts,
     names="Triage Level",
     values="Patients",
-    hole=0.5,
+    hole=0.55,
     title="Triage Severity Distribution",
+    color="Triage Level",
     template="plotly_dark"
 )
 
-col1.plotly_chart(fig_donut, use_container_width=True)
+col1.plotly_chart(fig_triage, use_container_width=True)
 
 # ----------------------------
-# BAR — DEPARTMENT LOAD
+# DEPARTMENT LOAD (BAR)
 # ----------------------------
-dept_counts = df["department"].value_counts().reset_index()
+dept_counts = (
+    df["department"]
+    .value_counts()
+    .reset_index()
+)
 dept_counts.columns = ["Department", "Patients"]
 
 fig_dept = px.bar(
@@ -129,81 +149,63 @@ fig_dept = px.bar(
     x="Patients",
     y="Department",
     orientation="h",
-    title="Department Load",
     text="Patients",
+    title="Department Load",
     template="plotly_dark"
 )
 
 col2.plotly_chart(fig_dept, use_container_width=True)
 
-# ============================
-# 🌦 WEATHER IMPACT ON PATIENT FLOW
-# ============================
+# =================================================
+# 🌡 TEMPERATURE BASED PATIENT FLOW (DONUT)
+# =================================================
+df_temp = df.copy()
+df_temp["Temperature Band"] = temp_category
 
-condition, temperature = get_weather()
+temp_counts = (
+    df_temp["Temperature Band"]
+    .value_counts()
+    .reset_index()
+)
+temp_counts.columns = ["Temperature Band", "Patients"]
 
-# Patient inflow per 10 minutes
-flow = (
-    df
-    .set_index("arrival_time")
-    .resample("10T")
-    .size()
-    .reset_index(name="Patients")
+fig_temp = px.pie(
+    temp_counts,
+    names="Temperature Band",
+    values="Patients",
+    hole=0.55,
+    title="Patient Distribution by Temperature Range",
+    color="Temperature Band",
+    color_discrete_map={
+        "Extreme Heat": "#D0021B",
+        "Hot": "#F5A623",
+        "Normal": "#7ED321",
+        "Cool": "#4A90E2"
+    },
+    template="plotly_dark"
 )
 
-# Weather line (constant temp over time window)
-flow["Temperature"] = temperature
+st.plotly_chart(fig_temp, use_container_width=True)
 
-fig_weather = go.Figure()
+st.info(f"Current Temperature: **{temperature}°C** → **{temp_category}** conditions")
 
-fig_weather.add_trace(
-    go.Bar(
-        x=flow["arrival_time"],
-        y=flow["Patients"],
-        name="Patient Inflow",
-        yaxis="y1"
-    )
-)
-
-fig_weather.add_trace(
-    go.Scatter(
-        x=flow["arrival_time"],
-        y=flow["Temperature"],
-        name="Temperature (°C)",
-        yaxis="y2",
-        mode="lines+markers"
-    )
-)
-
-fig_weather.update_layout(
-    title="Weather Impact on ER Patient Flow",
-    template="plotly_dark",
-    height=420,
-    xaxis_title="Time",
-    yaxis=dict(title="Patients"),
-    yaxis2=dict(
-        title="Temperature (°C)",
-        overlaying="y",
-        side="right"
-    )
-)
-
-st.plotly_chart(fig_weather, use_container_width=True)
-
-# ----------------------------
-# WEATHER INFO
-# ----------------------------
-st.info(f"Current Weather: {condition} | {temperature}°C")
-
+# -------------------------------------------------
+# WEATHER ALERT
+# -------------------------------------------------
 if condition in ["Rain", "Thunderstorm"] or temperature > 35:
-    st.warning("⚠ Extreme weather detected — ER inflow trend should be monitored")
+    st.warning("⚠ Extreme weather detected — ER inflow may increase")
 
-# ============================
-# ALERTS & LIVE FEED
-# ============================
-
+# =================================================
+# 🚨 CRITICAL ALERTS
+# =================================================
 st.subheader("🚨 Critical Triage Alerts (Level 1 & 2)")
-st.dataframe(critical.head(5), use_container_width=True)
+if not critical_df.empty:
+    st.dataframe(critical_df.head(5), use_container_width=True)
+else:
+    st.success("No critical patients currently")
 
+# =================================================
+# 📋 LIVE FEED
+# =================================================
 st.subheader("📋 Live Patient Feed")
 st.dataframe(df.head(15), use_container_width=True)
